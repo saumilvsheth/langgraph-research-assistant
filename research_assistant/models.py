@@ -5,6 +5,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from research_assistant.usage import UsageSummary
+
 
 class Analyst(BaseModel):
     """Analyst persona that drives research focus and report tone."""
@@ -38,6 +40,10 @@ class ResearchReport(BaseModel):
     generated_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(),
         description="ISO timestamp when the report was generated",
+    )
+    usage: Optional[UsageSummary] = Field(
+        default=None,
+        description="Token usage and estimated cost for this research run",
     )
 
 

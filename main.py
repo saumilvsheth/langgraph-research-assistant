@@ -6,7 +6,7 @@ Demonstrates:
   1. Passing an analyst (role, name, description)
   2. Handling human-in-the-loop interrupts
   3. Tavily web search
-  4. Structured report output
+  4. Structured report output with token usage and cost
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from langgraph.types import Command
 
 from research_assistant.graph import build_research_graph
 from research_assistant.models import Analyst, HumanInputResponse, ResearchReport
+from research_assistant.usage import UsageSummary
 
 
 def _print_interrupt(payload: dict[str, Any]) -> None:
@@ -48,6 +49,39 @@ def _collect_human_response() -> HumanInputResponse:
     return HumanInputResponse(additional_guidance=user_text or None)
 
 
+def _format_usd(amount: float) -> str:
+    if amount < 0.01:
+        return f"${amount:.6f}"
+    return f"${amount:.4f}"
+
+
+def _print_usage(usage: UsageSummary) -> None:
+    """Display token usage and estimated cost."""
+    print("\n" + "=" * 60)
+    print("TOKEN USAGE & COST")
+    print("=" * 60)
+
+    for step in usage.steps:
+        print(f"\n{step.step} ({step.provider} / {step.model})")
+        if step.provider == "openai":
+            print(f"  Prompt tokens     : {step.prompt_tokens:,}")
+            print(f"  Completion tokens : {step.completion_tokens:,}")
+            print(f"  Total tokens      : {step.total_tokens:,}")
+            print(f"  Input cost        : {_format_usd(step.input_cost_usd)}")
+            print(f"  Output cost       : {_format_usd(step.output_cost_usd)}")
+        elif step.tavily_credits is not None:
+            print(f"  Tavily credits    : {step.tavily_credits}")
+        print(f"  Step cost         : {_format_usd(step.total_cost_usd)}")
+
+    print("\n--- Totals ---")
+    print(f"  LLM prompt tokens     : {usage.total_prompt_tokens:,}")
+    print(f"  LLM completion tokens : {usage.total_completion_tokens:,}")
+    print(f"  LLM total tokens      : {usage.total_tokens:,}")
+    print(f"  LLM cost              : {_format_usd(usage.total_llm_cost_usd)}")
+    print(f"  Tavily cost           : {_format_usd(usage.total_tavily_cost_usd)}")
+    print(f"  Estimated total cost  : {_format_usd(usage.total_cost_usd)}")
+
+
 def _print_report(report: ResearchReport) -> None:
     """Display the structured report in a readable format."""
     print("\n" + "=" * 60)
@@ -71,6 +105,9 @@ def _print_report(report: ResearchReport) -> None:
         print(f"  • {source.title}")
         print(f"    {source.url}")
 
+    if report.usage:
+        _print_usage(report.usage)
+
 
 def run_research(analyst: Analyst, *, thread_id: str | None = None) -> ResearchReport:
     """
@@ -87,6 +124,7 @@ def run_research(analyst: Analyst, *, thread_id: str | None = None) -> ResearchR
         "search_query": "",
         "search_results": [],
         "report": None,
+        "usage": UsageSummary(),
         "messages": [],
     }
 
@@ -110,6 +148,12 @@ def run_research(analyst: Analyst, *, thread_id: str | None = None) -> ResearchR
 
     if isinstance(report, dict):
         report = ResearchReport.model_validate(report)
+
+    usage = result.get("usage")
+    if usage and report.usage is None:
+        if isinstance(usage, dict):
+            usage = UsageSummary.model_validate(usage)
+        report.usage = usage
 
     return report
 

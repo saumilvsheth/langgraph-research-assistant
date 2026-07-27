@@ -16,6 +16,7 @@ from research_assistant.models import (
     ResearchReport,
 )
 from research_assistant.state import ResearchState
+from research_assistant.usage import UsageSummary, record_openai_usage, record_tavily_usage
 
 
 def _get_llm() -> ChatOpenAI:
@@ -24,13 +25,22 @@ def _get_llm() -> ChatOpenAI:
     return ChatOpenAI(model=model, temperature=0.2)
 
 
+def _get_model_name() -> str:
+    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+
 def _get_tavily_search() -> TavilySearch:
     """Create the Tavily search tool."""
     return TavilySearch(
         max_results=int(os.getenv("TAVILY_MAX_RESULTS", "5")),
         search_depth=os.getenv("TAVILY_SEARCH_DEPTH", "advanced"),
         include_answer=True,
+        include_usage=True,
     )
+
+
+def _get_search_depth() -> str:
+    return os.getenv("TAVILY_SEARCH_DEPTH", "advanced")
 
 
 def prepare_analyst_node(state: ResearchState) -> dict:
@@ -41,8 +51,10 @@ def prepare_analyst_node(state: ResearchState) -> dict:
     before pausing for human input or hitting Tavily.
     """
     analyst: Analyst = state["analyst"]
+    usage: UsageSummary = state.get("usage") or UsageSummary()
 
     llm = _get_llm()
+    model = _get_model_name()
     prompt = f"""You are helping {analyst.name}, a {analyst.role}.
 
 Analyst background:
@@ -52,6 +64,8 @@ Write one concise web search query (max 20 words) that this analyst would use
 to start their research. Return ONLY the query text, no quotes or explanation."""
 
     response = llm.invoke([HumanMessage(content=prompt)])
+    record_openai_usage(usage, step="prepare_analyst", model=model, message=response)
+
     search_query = response.content.strip().strip('"').strip("'")
 
     return {
@@ -59,6 +73,7 @@ to start their research. Return ONLY the query text, no quotes or explanation.""
         "human_guidance": state.get("human_guidance"),
         "search_results": [],
         "report": None,
+        "usage": usage,
     }
 
 
@@ -81,7 +96,6 @@ def human_input_node(state: ResearchState) -> dict:
         optional=True,
     )
 
-    # Graph pauses here until resumed with a HumanInputResponse payload.
     human_response = interrupt(request.model_dump())
 
     if isinstance(human_response, dict):
@@ -102,6 +116,8 @@ def tavily_search_node(state: ResearchState) -> dict:
     analyst: Analyst = state["analyst"]
     search_query = state["search_query"]
     human_guidance = state.get("human_guidance")
+    usage: UsageSummary = state.get("usage") or UsageSummary()
+    search_depth = _get_search_depth()
 
     if human_guidance:
         search_query = (
@@ -112,8 +128,18 @@ def tavily_search_node(state: ResearchState) -> dict:
     tavily = _get_tavily_search()
     raw_results = tavily.invoke({"query": search_query})
 
-    results = raw_results.get("results", []) if isinstance(raw_results, dict) else []
-    return {"search_results": results, "search_query": search_query}
+    if isinstance(raw_results, dict):
+        record_tavily_usage(
+            usage,
+            step="tavily_search",
+            search_depth=search_depth,
+            raw_results=raw_results,
+        )
+        results = raw_results.get("results", [])
+    else:
+        results = []
+
+    return {"search_results": results, "search_query": search_query, "usage": usage}
 
 
 def generate_report_node(state: ResearchState) -> dict:
@@ -121,8 +147,10 @@ def generate_report_node(state: ResearchState) -> dict:
     analyst: Analyst = state["analyst"]
     search_results = state["search_results"]
     human_guidance = state.get("human_guidance")
+    usage: UsageSummary = state.get("usage") or UsageSummary()
+    model = _get_model_name()
 
-    llm = _get_llm().with_structured_output(ResearchReport)
+    llm = _get_llm().with_structured_output(ResearchReport, include_raw=True)
 
     sources_text = json.dumps(search_results, indent=2)
     guidance_block = (
@@ -148,15 +176,20 @@ Search results:
 
 Create a structured research report for analyst '{analyst.name}' with role '{analyst.role}'."""
 
-    report: ResearchReport = llm.invoke(
+    result = llm.invoke(
         [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
     )
 
+    report: ResearchReport = result["parsed"]
+    raw_message = result["raw"]
+    record_openai_usage(usage, step="generate_report", model=model, message=raw_message)
+
     report.analyst_name = analyst.name
     report.analyst_role = analyst.role
     report.generated_at = datetime.now(timezone.utc).isoformat()
+    report.usage = usage
 
-    return {"report": report}
+    return {"report": report, "usage": usage}
