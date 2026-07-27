@@ -6,13 +6,13 @@ Demonstrates:
   1. Passing an analyst (role, name, description)
   2. Handling human-in-the-loop interrupts
   3. Tavily web search
-  4. Structured report output with token usage and cost
+  4. Advanced model council evaluation
+  5. Structured report output with token usage and cost
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import uuid
 from typing import Any
@@ -21,14 +21,20 @@ from dotenv import load_dotenv
 from langgraph.types import Command
 
 from research_assistant.graph import build_research_graph
-from research_assistant.models import Analyst, HumanInputResponse, ResearchReport
+from research_assistant.models import (
+    Analyst,
+    CouncilEvaluation,
+    CouncilVerdictResponse,
+    HumanInputResponse,
+    ResearchReport,
+)
 from research_assistant.usage import UsageSummary
 
 
-def _print_interrupt(payload: dict[str, Any]) -> None:
-    """Pretty-print the interrupt payload shown to the human reviewer."""
+def _print_guidance_interrupt(payload: dict[str, Any]) -> None:
+    """Pretty-print the pre-search human guidance interrupt."""
     print("\n" + "=" * 60)
-    print("HUMAN INPUT REQUIRED")
+    print("HUMAN INPUT REQUIRED — RESEARCH GUIDANCE")
     print("=" * 60)
     print(payload.get("message", ""))
     analyst = payload.get("analyst", {})
@@ -40,13 +46,60 @@ def _print_interrupt(payload: dict[str, Any]) -> None:
     print("-" * 60)
 
 
-def _collect_human_response() -> HumanInputResponse:
-    """Read optional guidance from stdin after an interrupt."""
+def _print_council_interrupt(payload: dict[str, Any]) -> None:
+    """Pretty-print the council verdict interrupt."""
+    print("\n" + "=" * 60)
+    print("HUMAN INPUT REQUIRED — COUNCIL VERDICT")
+    print("=" * 60)
+    print(payload.get("message", ""))
+
+    evaluation = payload.get("evaluation")
+    if evaluation:
+        if isinstance(evaluation, dict):
+            evaluation = CouncilEvaluation.model_validate(evaluation)
+        print(f"\nConsensus score : {evaluation.consensus_score:.1f}/10")
+        print(f"Council verdict : {evaluation.final_verdict}")
+        print(f"\nChair synthesis:\n{evaluation.synthesis}")
+        print("\n--- Individual Reviews ---")
+        for review in evaluation.member_reviews:
+            print(
+                f"\n{review.reviewer_name} ({review.model_used}) — "
+                f"{review.overall_score}/10 → {review.recommendation}"
+            )
+            print(f"  Strengths : {', '.join(review.strengths[:2])}")
+            print(f"  Weaknesses: {', '.join(review.weaknesses[:2])}")
+
+    print("\nType one of: approve | revise | reject")
+    print("Add notes after a colon, e.g.  revise: strengthen source citations")
+    print("-" * 60)
+
+
+def _collect_guidance_response() -> HumanInputResponse:
     try:
         user_text = input("> ").strip()
     except EOFError:
         user_text = ""
     return HumanInputResponse(additional_guidance=user_text or None)
+
+
+def _collect_council_verdict() -> CouncilVerdictResponse:
+    try:
+        user_text = input("> ").strip()
+    except EOFError:
+        user_text = "approve"
+
+    text = user_text.lower()
+    if not text:
+        return CouncilVerdictResponse(decision="approve")
+
+    if ":" in text:
+        decision, notes = text.split(":", 1)
+        return CouncilVerdictResponse(decision=decision.strip(), human_notes=notes.strip() or None)
+
+    decision = text.split()[0]
+    if decision not in {"approve", "revise", "reject"}:
+        decision = "approve"
+    return CouncilVerdictResponse(decision=decision)
 
 
 def _format_usd(amount: float) -> str:
@@ -56,7 +109,6 @@ def _format_usd(amount: float) -> str:
 
 
 def _print_usage(usage: UsageSummary) -> None:
-    """Display token usage and estimated cost."""
     print("\n" + "=" * 60)
     print("TOKEN USAGE & COST")
     print("=" * 60)
@@ -82,14 +134,44 @@ def _print_usage(usage: UsageSummary) -> None:
     print(f"  Estimated total cost  : {_format_usd(usage.total_cost_usd)}")
 
 
+def _print_council_evaluation(evaluation: CouncilEvaluation) -> None:
+    print("\n" + "=" * 60)
+    print("MODEL COUNCIL EVALUATION")
+    print("=" * 60)
+    print(f"Consensus score : {evaluation.consensus_score:.1f}/10")
+    print(f"Threshold       : {evaluation.threshold_used:.1f}/10")
+    print(f"Final verdict   : {evaluation.final_verdict}")
+    print(f"Revision cycles : {evaluation.revision_count}")
+    print(f"\nChair synthesis:\n{evaluation.synthesis}")
+
+    if evaluation.revision_priorities:
+        print("\n--- Revision Priorities ---")
+        for i, item in enumerate(evaluation.revision_priorities, start=1):
+            print(f"  {i}. {item}")
+
+    print("\n--- Member Reviews ---")
+    for review in evaluation.member_reviews:
+        print(f"\n{review.reviewer_name} ({review.reviewer_role})")
+        print(f"  Model         : {review.model_used}")
+        print(f"  Overall       : {review.overall_score}/10")
+        print(f"  Factual       : {review.factual_accuracy_score}/10")
+        print(f"  Rigor         : {review.analytical_rigor_score}/10")
+        print(f"  Domain fit    : {review.domain_fit_score}/10")
+        print(f"  Recommendation: {review.recommendation}")
+        print(f"  Feedback      : {review.feedback}")
+
+
 def _print_report(report: ResearchReport) -> None:
-    """Display the structured report in a readable format."""
     print("\n" + "=" * 60)
     print("RESEARCH REPORT")
     print("=" * 60)
     print(f"Analyst : {report.analyst_name} ({report.analyst_role})")
     print(f"Title   : {report.title}")
     print(f"Generated: {report.generated_at}")
+    if report.human_approved is not None:
+        status = "Approved" if report.human_approved else "Rejected"
+        print(f"Human verdict: {status}")
+
     print("\n--- Executive Summary ---")
     print(report.executive_summary)
     print("\n--- Key Findings ---")
@@ -105,16 +187,15 @@ def _print_report(report: ResearchReport) -> None:
         print(f"  • {source.title}")
         print(f"    {source.url}")
 
+    if report.council_evaluation:
+        _print_council_evaluation(report.council_evaluation)
+
     if report.usage:
         _print_usage(report.usage)
 
 
 def run_research(analyst: Analyst, *, thread_id: str | None = None) -> ResearchReport:
-    """
-    Run the full research workflow, handling interrupts along the way.
-
-    Returns the final structured ResearchReport.
-    """
+    """Run the full research workflow, handling all interrupts along the way."""
     graph = build_research_graph()
     config = {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}
 
@@ -124,6 +205,10 @@ def run_research(analyst: Analyst, *, thread_id: str | None = None) -> ResearchR
         "search_query": "",
         "search_results": [],
         "report": None,
+        "council_evaluation": None,
+        "revision_count": 0,
+        "revision_feedback": None,
+        "human_approved": None,
         "usage": UsageSummary(),
         "messages": [],
     }
@@ -138,9 +223,19 @@ def run_research(analyst: Analyst, *, thread_id: str | None = None) -> ResearchR
             break
 
         interrupt_payload = interrupts[0].value
-        _print_interrupt(interrupt_payload)
-        human_response = _collect_human_response()
-        stream_input = Command(resume=human_response.model_dump())
+        if not isinstance(interrupt_payload, dict):
+            interrupt_payload = {"type": "human_guidance", "message": str(interrupt_payload)}
+
+        interrupt_type = interrupt_payload.get("type", "human_guidance")
+
+        if interrupt_type == "council_verdict":
+            _print_council_interrupt(interrupt_payload)
+            response = _collect_council_verdict()
+            stream_input = Command(resume=response.model_dump())
+        else:
+            _print_guidance_interrupt(interrupt_payload)
+            response = _collect_guidance_response()
+            stream_input = Command(resume=response.model_dump())
 
     report = result.get("report")
     if report is None:
@@ -151,9 +246,20 @@ def run_research(analyst: Analyst, *, thread_id: str | None = None) -> ResearchR
 
     usage = result.get("usage")
     if usage and report.usage is None:
-        if isinstance(usage, dict):
-            usage = UsageSummary.model_validate(usage)
-        report.usage = usage
+        report.usage = (
+            UsageSummary.model_validate(usage) if isinstance(usage, dict) else usage
+        )
+
+    if result.get("human_approved") is not None:
+        report.human_approved = result["human_approved"]
+
+    council_evaluation = result.get("council_evaluation")
+    if council_evaluation and report.council_evaluation is None:
+        report.council_evaluation = (
+            CouncilEvaluation.model_validate(council_evaluation)
+            if isinstance(council_evaluation, dict)
+            else council_evaluation
+        )
 
     return report
 
@@ -162,7 +268,7 @@ def main() -> int:
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="LangGraph research assistant with human-in-the-loop interrupts"
+        description="LangGraph research assistant with model council evaluation"
     )
     parser.add_argument("--name", required=True, help="Analyst name")
     parser.add_argument("--role", required=True, help="Analyst role")

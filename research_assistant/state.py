@@ -4,7 +4,7 @@ from typing import Annotated, Optional, TypedDict
 
 from langgraph.graph.message import add_messages
 
-from research_assistant.models import Analyst, ResearchReport
+from research_assistant.models import Analyst, CouncilEvaluation, ResearchReport
 from research_assistant.usage import UsageSummary
 
 
@@ -16,5 +16,9 @@ class ResearchState(TypedDict):
     search_query: str
     search_results: list[dict]
     report: Optional[ResearchReport]
+    council_evaluation: Optional[CouncilEvaluation]
+    revision_count: int
+    revision_feedback: Optional[str]
+    human_approved: Optional[bool]
     usage: UsageSummary
     messages: Annotated[list, add_messages]
