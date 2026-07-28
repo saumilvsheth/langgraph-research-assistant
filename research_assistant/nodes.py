@@ -25,31 +25,44 @@ from research_assistant.models import (
     ResearchReport,
 )
 from research_assistant.state import ResearchState
+from research_assistant.trace import trace
 from research_assistant.usage import UsageSummary, record_openai_usage, record_tavily_usage
 
 
 def _get_llm() -> ChatOpenAI:
     """Create the chat model used for query generation and report writing."""
+    trace("nodes", "_get_llm", "ENTER")
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    return ChatOpenAI(model=model, temperature=0.2)
+    llm = ChatOpenAI(model=model, temperature=0.2)
+    trace("nodes", "_get_llm", "EXIT", f"model={model}")
+    return llm
 
 
 def _get_model_name() -> str:
-    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    trace("nodes", "_get_model_name", "ENTER")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    trace("nodes", "_get_model_name", "EXIT", f"model={model}")
+    return model
 
 
 def _get_tavily_search() -> TavilySearch:
     """Create the Tavily search tool."""
-    return TavilySearch(
+    trace("nodes", "_get_tavily_search", "ENTER")
+    tavily = TavilySearch(
         max_results=int(os.getenv("TAVILY_MAX_RESULTS", "5")),
         search_depth=os.getenv("TAVILY_SEARCH_DEPTH", "advanced"),
         include_answer=True,
         include_usage=True,
     )
+    trace("nodes", "_get_tavily_search", "EXIT")
+    return tavily
 
 
 def _get_search_depth() -> str:
-    return os.getenv("TAVILY_SEARCH_DEPTH", "advanced")
+    trace("nodes", "_get_search_depth", "ENTER")
+    depth = os.getenv("TAVILY_SEARCH_DEPTH", "advanced")
+    trace("nodes", "_get_search_depth", "EXIT", f"depth={depth}")
+    return depth
 
 
 def _build_report(
@@ -63,6 +76,12 @@ def _build_report(
     step_prefix: str = "generate_report",
 ) -> ResearchReport:
     """Shared report generation logic used for initial draft and revisions."""
+    trace(
+        "nodes",
+        "_build_report",
+        "ENTER",
+        f"step={step_prefix}, analyst={analyst.name}, results={len(search_results)}",
+    )
     model = _get_model_name()
     llm = _get_llm().with_structured_output(ResearchReport, include_raw=True)
 
@@ -109,12 +128,14 @@ Create a structured research report for analyst '{analyst.name}' with role '{ana
     report.analyst_role = analyst.role
     report.generated_at = datetime.now(timezone.utc).isoformat()
     report.usage = usage
+    trace("nodes", "_build_report", "EXIT", f"title={report.title!r}")
     return report
 
 
 def prepare_analyst_node(state: ResearchState) -> dict:
     """Validate analyst input and build an initial search query from their profile."""
     analyst: Analyst = state["analyst"]
+    trace("nodes", "prepare_analyst_node", "ENTER", f"analyst={analyst.name}")
     usage: UsageSummary = state.get("usage") or UsageSummary()
 
     llm = _get_llm()
@@ -132,6 +153,7 @@ to start their research. Return ONLY the query text, no quotes or explanation.""
 
     search_query = response.content.strip().strip('"').strip("'")
 
+    trace("nodes", "prepare_analyst_node", "EXIT", f"search_query={search_query!r}")
     return {
         "search_query": search_query,
         "human_guidance": state.get("human_guidance"),
@@ -148,6 +170,7 @@ to start their research. Return ONLY the query text, no quotes or explanation.""
 def human_input_node(state: ResearchState) -> dict:
     """Pause for optional human research guidance before search."""
     analyst: Analyst = state["analyst"]
+    trace("nodes", "human_input_node", "ENTER", f"analyst={analyst.name}")
 
     request = HumanInputRequest(
         message=(
@@ -159,6 +182,7 @@ def human_input_node(state: ResearchState) -> dict:
         optional=True,
     )
 
+    trace("nodes", "human_input_node", "INTERRUPT", "waiting for human guidance")
     human_response = interrupt(request.model_dump())
 
     if isinstance(human_response, dict):
@@ -167,6 +191,7 @@ def human_input_node(state: ResearchState) -> dict:
         parsed = HumanInputResponse(additional_guidance=str(human_response) or None)
 
     guidance = (parsed.additional_guidance or "").strip() or None
+    trace("nodes", "human_input_node", "EXIT", f"guidance={guidance!r}")
     return {"human_guidance": guidance}
 
 
@@ -175,6 +200,7 @@ def tavily_search_node(state: ResearchState) -> dict:
     analyst: Analyst = state["analyst"]
     search_query = state["search_query"]
     human_guidance = state.get("human_guidance")
+    trace("nodes", "tavily_search_node", "ENTER", f"query={search_query!r}")
     usage: UsageSummary = state.get("usage") or UsageSummary()
     search_depth = _get_search_depth()
 
@@ -198,11 +224,13 @@ def tavily_search_node(state: ResearchState) -> dict:
     else:
         results = []
 
+    trace("nodes", "tavily_search_node", "EXIT", f"results={len(results)}")
     return {"search_results": results, "search_query": search_query, "usage": usage}
 
 
 def generate_report_node(state: ResearchState) -> dict:
     """Generate the initial structured research report from Tavily results."""
+    trace("nodes", "generate_report_node", "ENTER")
     report = _build_report(
         analyst=state["analyst"],
         search_query=state["search_query"],
@@ -212,12 +240,14 @@ def generate_report_node(state: ResearchState) -> dict:
         usage=state.get("usage") or UsageSummary(),
         step_prefix="generate_report",
     )
+    trace("nodes", "generate_report_node", "EXIT", f"title={report.title!r}")
     return {"report": report, "usage": report.usage}
 
 
 def regenerate_report_node(state: ResearchState) -> dict:
     """Regenerate the report using council or human revision feedback."""
     revision_count = state.get("revision_count", 0) + 1
+    trace("nodes", "regenerate_report_node", "ENTER", f"revision={revision_count}")
     evaluation = state.get("council_evaluation")
 
     feedback_parts = []
@@ -239,6 +269,7 @@ def regenerate_report_node(state: ResearchState) -> dict:
         step_prefix=f"regenerate_report_{revision_count}",
     )
 
+    trace("nodes", "regenerate_report_node", "EXIT", f"title={report.title!r}")
     return {
         "report": report,
         "revision_count": revision_count,
@@ -251,6 +282,7 @@ def regenerate_report_node(state: ResearchState) -> dict:
 def council_evaluate_node(state: ResearchState) -> dict:
     """Run parallel council member evaluations on the current report."""
     report = state["report"]
+    trace("nodes", "council_evaluate_node", "ENTER", f"report={report.title if report else None!r}")
     if report is None:
         raise RuntimeError("Council evaluation requires a report.")
 
@@ -274,6 +306,12 @@ def council_evaluate_node(state: ResearchState) -> dict:
     )
 
     report.council_evaluation = evaluation
+    trace(
+        "nodes",
+        "council_evaluate_node",
+        "EXIT",
+        f"score={evaluation.consensus_score}, verdict={evaluation.final_verdict}",
+    )
     return {"council_evaluation": evaluation, "report": report, "usage": usage}
 
 
@@ -281,6 +319,7 @@ def council_human_verdict_node(state: ResearchState) -> dict:
     """Pause for human approval, rejection, or revision request after council review."""
     report = state["report"]
     evaluation = state["council_evaluation"]
+    trace("nodes", "council_human_verdict_node", "ENTER", f"title={report.title if report else None!r}")
     if report is None or evaluation is None:
         raise RuntimeError("Council verdict requires a report and evaluation.")
 
@@ -297,6 +336,7 @@ def council_human_verdict_node(state: ResearchState) -> dict:
         final_verdict=evaluation.final_verdict,
     )
 
+    trace("nodes", "council_human_verdict_node", "INTERRUPT", "waiting for human verdict")
     human_response = interrupt(request.model_dump())
 
     if isinstance(human_response, dict):
@@ -316,13 +356,16 @@ def council_human_verdict_node(state: ResearchState) -> dict:
     elif parsed.decision == "reject":
         updates["human_approved"] = False
 
+    trace("nodes", "council_human_verdict_node", "EXIT", f"decision={parsed.decision}")
     return updates
 
 
 def _parse_verdict_text(text: str) -> CouncilVerdictResponse:
     """Parse simple CLI verdict input like 'approve' or 'revise: fix sources'."""
+    trace("nodes", "_parse_verdict_text", "ENTER", f"text={text!r}")
     text = text.strip().lower()
     if not text:
+        trace("nodes", "_parse_verdict_text", "EXIT", "decision=approve (empty input)")
         return CouncilVerdictResponse(decision="approve")
 
     if ":" in text:
@@ -336,13 +379,16 @@ def _parse_verdict_text(text: str) -> CouncilVerdictResponse:
     if decision not in {"approve", "revise", "reject"}:
         decision = "approve"
 
+    trace("nodes", "_parse_verdict_text", "EXIT", f"decision={decision}")
     return CouncilVerdictResponse(decision=decision, human_notes=notes)
 
 
 def route_after_chair(state: ResearchState) -> str:
     """Auto-regenerate if council score is below threshold and revisions remain."""
+    trace("routing", "route_after_chair", "ENTER")
     evaluation = state.get("council_evaluation")
     if evaluation is None:
+        trace("routing", "route_after_chair", "ROUTE", "next=council_human_verdict (no evaluation)")
         return "council_human_verdict"
 
     below_threshold = evaluation.consensus_score < get_council_threshold()
@@ -350,20 +396,30 @@ def route_after_chair(state: ResearchState) -> str:
     needs_revision = evaluation.final_verdict in {"needs_revision", "rejected"}
 
     if (below_threshold or needs_revision) and can_revise:
+        trace(
+            "routing",
+            "route_after_chair",
+            "ROUTE",
+            f"next=regenerate_report (score={evaluation.consensus_score}, revisions={state.get('revision_count', 0)})",
+        )
         return "regenerate_report"
 
+    trace("routing", "route_after_chair", "ROUTE", "next=council_human_verdict")
     return "council_human_verdict"
 
 
 def route_after_human_verdict(state: ResearchState) -> str:
     """Route based on the human's council verdict decision."""
+    trace("routing", "route_after_human_verdict", "ENTER")
     if state.get("human_approved") is True:
+        trace("routing", "route_after_human_verdict", "ROUTE", "next=__end__ (approved)")
         return "__end__"
 
-    evaluation = state.get("council_evaluation")
     can_revise = state.get("revision_count", 0) < get_max_revisions()
 
     if state.get("revision_feedback") and can_revise:
+        trace("routing", "route_after_human_verdict", "ROUTE", "next=regenerate_report")
         return "regenerate_report"
 
+    trace("routing", "route_after_human_verdict", "ROUTE", "next=__end__")
     return "__end__"

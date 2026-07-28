@@ -16,6 +16,7 @@ from research_assistant.models import (
     CouncilMemberReview,
     ResearchReport,
 )
+from research_assistant.trace import trace
 from research_assistant.usage import UsageSummary, record_openai_usage
 
 
@@ -58,23 +59,36 @@ DEFAULT_COUNCIL_MEMBERS: tuple[CouncilMemberConfig, ...] = (
 
 
 def get_council_threshold() -> float:
-    return float(os.getenv("COUNCIL_THRESHOLD", "7.0"))
+    trace("council", "get_council_threshold", "ENTER")
+    threshold = float(os.getenv("COUNCIL_THRESHOLD", "7.0"))
+    trace("council", "get_council_threshold", "EXIT", f"threshold={threshold}")
+    return threshold
 
 
 def get_max_revisions() -> int:
-    return int(os.getenv("COUNCIL_MAX_REVISIONS", "2"))
+    trace("council", "get_max_revisions", "ENTER")
+    max_revisions = int(os.getenv("COUNCIL_MAX_REVISIONS", "2"))
+    trace("council", "get_max_revisions", "EXIT", f"max_revisions={max_revisions}")
+    return max_revisions
 
 
 def get_chair_model() -> str:
-    return os.getenv("COUNCIL_CHAIR_MODEL", "gpt-4o")
+    trace("council", "get_chair_model", "ENTER")
+    model = os.getenv("COUNCIL_CHAIR_MODEL", "gpt-4o")
+    trace("council", "get_chair_model", "EXIT", f"model={model}")
+    return model
 
 
 def _build_llm(model: str) -> ChatOpenAI:
-    return ChatOpenAI(model=model, temperature=0.1)
+    trace("council", "_build_llm", "ENTER", f"model={model}")
+    llm = ChatOpenAI(model=model, temperature=0.1)
+    trace("council", "_build_llm", "EXIT")
+    return llm
 
 
 def _report_to_text(report: ResearchReport) -> str:
-    return json.dumps(
+    trace("council", "_report_to_text", "ENTER", f"title={report.title!r}")
+    text = json.dumps(
         {
             "title": report.title,
             "executive_summary": report.executive_summary,
@@ -85,6 +99,8 @@ def _report_to_text(report: ResearchReport) -> str:
         },
         indent=2,
     )
+    trace("council", "_report_to_text", "EXIT", f"chars={len(text)}")
+    return text
 
 
 def _evaluate_member_sync(
@@ -97,6 +113,7 @@ def _evaluate_member_sync(
     revision_feedback: str | None,
 ) -> CouncilMemberReview:
     """Run a single council member evaluation (sync)."""
+    trace("council", "_evaluate_member_sync", "ENTER", f"member={member.name}, model={member.model}")
     llm = _build_llm(member.model).with_structured_output(CouncilMemberReview, include_raw=True)
 
     feedback_block = ""
@@ -141,6 +158,12 @@ Provide your structured review as {member.name}."""
         model=member.model,
         message=result["raw"],
     )
+    trace(
+        "council",
+        "_evaluate_member_sync",
+        "EXIT",
+        f"member={member.name}, score={review.overall_score}, rec={review.recommendation}",
+    )
     return review
 
 
@@ -149,7 +172,10 @@ async def _evaluate_member_async(
     **kwargs,
 ) -> CouncilMemberReview:
     """Async wrapper so council members can run in parallel."""
-    return await asyncio.to_thread(_evaluate_member_sync, member, **kwargs)
+    trace("council", "_evaluate_member_async", "ENTER", f"member={member.name}")
+    review = await asyncio.to_thread(_evaluate_member_sync, member, **kwargs)
+    trace("council", "_evaluate_member_async", "EXIT", f"member={member.name}")
+    return review
 
 
 async def run_council_parallel(
@@ -162,6 +188,8 @@ async def run_council_parallel(
     members: tuple[CouncilMemberConfig, ...] = DEFAULT_COUNCIL_MEMBERS,
 ) -> list[CouncilMemberReview]:
     """Run all council members in parallel."""
+    member_names = [m.name for m in members]
+    trace("council", "run_council_parallel", "ENTER", f"members={member_names}")
     tasks = [
         _evaluate_member_async(
             member,
@@ -173,7 +201,9 @@ async def run_council_parallel(
         )
         for member in members
     ]
-    return list(await asyncio.gather(*tasks))
+    reviews = list(await asyncio.gather(*tasks))
+    trace("council", "run_council_parallel", "EXIT", f"reviews={len(reviews)}")
+    return reviews
 
 
 def synthesize_council(
@@ -184,6 +214,7 @@ def synthesize_council(
     revision_count: int,
 ) -> CouncilEvaluation:
     """Chair model synthesizes individual reviews into a final council evaluation."""
+    trace("council", "synthesize_council", "ENTER", f"reviews={len(reviews)}, revision={revision_count}")
     chair_model = get_chair_model()
     llm = _build_llm(chair_model).with_structured_output(CouncilEvaluation, include_raw=True)
 
@@ -225,5 +256,11 @@ Produce the final CouncilEvaluation with member_reviews included."""
         step="council_chair",
         model=chair_model,
         message=result["raw"],
+    )
+    trace(
+        "council",
+        "synthesize_council",
+        "EXIT",
+        f"score={evaluation.consensus_score}, verdict={evaluation.final_verdict}",
     )
     return evaluation

@@ -28,11 +28,13 @@ from research_assistant.models import (
     HumanInputResponse,
     ResearchReport,
 )
+from research_assistant.trace import trace
 from research_assistant.usage import UsageSummary
 
 
 def _print_guidance_interrupt(payload: dict[str, Any]) -> None:
     """Pretty-print the pre-search human guidance interrupt."""
+    trace("cli", "_print_guidance_interrupt", "ENTER")
     print("\n" + "=" * 60)
     print("HUMAN INPUT REQUIRED — RESEARCH GUIDANCE")
     print("=" * 60)
@@ -44,10 +46,12 @@ def _print_guidance_interrupt(payload: dict[str, Any]) -> None:
     print("\nPress Enter to continue without extra guidance,")
     print("or type additional research instructions:")
     print("-" * 60)
+    trace("cli", "_print_guidance_interrupt", "EXIT")
 
 
 def _print_council_interrupt(payload: dict[str, Any]) -> None:
     """Pretty-print the council verdict interrupt."""
+    trace("cli", "_print_council_interrupt", "ENTER")
     print("\n" + "=" * 60)
     print("HUMAN INPUT REQUIRED — COUNCIL VERDICT")
     print("=" * 60)
@@ -72,17 +76,22 @@ def _print_council_interrupt(payload: dict[str, Any]) -> None:
     print("\nType one of: approve | revise | reject")
     print("Add notes after a colon, e.g.  revise: strengthen source citations")
     print("-" * 60)
+    trace("cli", "_print_council_interrupt", "EXIT")
 
 
 def _collect_guidance_response() -> HumanInputResponse:
+    trace("cli", "_collect_guidance_response", "ENTER")
     try:
         user_text = input("> ").strip()
     except EOFError:
         user_text = ""
-    return HumanInputResponse(additional_guidance=user_text or None)
+    response = HumanInputResponse(additional_guidance=user_text or None)
+    trace("cli", "_collect_guidance_response", "EXIT", f"guidance={response.additional_guidance!r}")
+    return response
 
 
 def _collect_council_verdict() -> CouncilVerdictResponse:
+    trace("cli", "_collect_council_verdict", "ENTER")
     try:
         user_text = input("> ").strip()
     except EOFError:
@@ -90,16 +99,20 @@ def _collect_council_verdict() -> CouncilVerdictResponse:
 
     text = user_text.lower()
     if not text:
+        trace("cli", "_collect_council_verdict", "EXIT", "decision=approve (empty)")
         return CouncilVerdictResponse(decision="approve")
 
     if ":" in text:
         decision, notes = text.split(":", 1)
-        return CouncilVerdictResponse(decision=decision.strip(), human_notes=notes.strip() or None)
+        response = CouncilVerdictResponse(decision=decision.strip(), human_notes=notes.strip() or None)
+    else:
+        decision = text.split()[0]
+        if decision not in {"approve", "revise", "reject"}:
+            decision = "approve"
+        response = CouncilVerdictResponse(decision=decision)
 
-    decision = text.split()[0]
-    if decision not in {"approve", "revise", "reject"}:
-        decision = "approve"
-    return CouncilVerdictResponse(decision=decision)
+    trace("cli", "_collect_council_verdict", "EXIT", f"decision={response.decision}")
+    return response
 
 
 def _format_usd(amount: float) -> str:
@@ -109,6 +122,7 @@ def _format_usd(amount: float) -> str:
 
 
 def _print_usage(usage: UsageSummary) -> None:
+    trace("cli", "_print_usage", "ENTER", f"steps={len(usage.steps)}")
     print("\n" + "=" * 60)
     print("TOKEN USAGE & COST")
     print("=" * 60)
@@ -132,9 +146,11 @@ def _print_usage(usage: UsageSummary) -> None:
     print(f"  LLM cost              : {_format_usd(usage.total_llm_cost_usd)}")
     print(f"  Tavily cost           : {_format_usd(usage.total_tavily_cost_usd)}")
     print(f"  Estimated total cost  : {_format_usd(usage.total_cost_usd)}")
+    trace("cli", "_print_usage", "EXIT")
 
 
 def _print_council_evaluation(evaluation: CouncilEvaluation) -> None:
+    trace("cli", "_print_council_evaluation", "ENTER", f"score={evaluation.consensus_score}")
     print("\n" + "=" * 60)
     print("MODEL COUNCIL EVALUATION")
     print("=" * 60)
@@ -159,9 +175,11 @@ def _print_council_evaluation(evaluation: CouncilEvaluation) -> None:
         print(f"  Domain fit    : {review.domain_fit_score}/10")
         print(f"  Recommendation: {review.recommendation}")
         print(f"  Feedback      : {review.feedback}")
+    trace("cli", "_print_council_evaluation", "EXIT")
 
 
 def _print_report(report: ResearchReport) -> None:
+    trace("cli", "_print_report", "ENTER", f"title={report.title!r}")
     print("\n" + "=" * 60)
     print("RESEARCH REPORT")
     print("=" * 60)
@@ -192,10 +210,12 @@ def _print_report(report: ResearchReport) -> None:
 
     if report.usage:
         _print_usage(report.usage)
+    trace("cli", "_print_report", "EXIT")
 
 
 def run_research(analyst: Analyst, *, thread_id: str | None = None) -> ResearchReport:
     """Run the full research workflow, handling all interrupts along the way."""
+    trace("cli", "run_research", "ENTER", f"analyst={analyst.name}, thread={thread_id}")
     graph = build_research_graph()
     config = {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}
 
@@ -214,12 +234,16 @@ def run_research(analyst: Analyst, *, thread_id: str | None = None) -> ResearchR
     }
 
     stream_input: dict | Command = initial_input
+    invoke_count = 0
 
     while True:
+        invoke_count += 1
+        trace("cli", "run_research", "INVOKE", f"graph.invoke #{invoke_count}")
         result = graph.invoke(stream_input, config=config)
 
         interrupts = result.get("__interrupt__")
         if not interrupts:
+            trace("cli", "run_research", "BLOCK", "no interrupt — graph finished")
             break
 
         interrupt_payload = interrupts[0].value
@@ -227,6 +251,7 @@ def run_research(analyst: Analyst, *, thread_id: str | None = None) -> ResearchR
             interrupt_payload = {"type": "human_guidance", "message": str(interrupt_payload)}
 
         interrupt_type = interrupt_payload.get("type", "human_guidance")
+        trace("cli", "run_research", "INTERRUPT", f"type={interrupt_type}")
 
         if interrupt_type == "council_verdict":
             _print_council_interrupt(interrupt_payload)
@@ -261,10 +286,12 @@ def run_research(analyst: Analyst, *, thread_id: str | None = None) -> ResearchR
             else council_evaluation
         )
 
+    trace("cli", "run_research", "EXIT", f"title={report.title!r}")
     return report
 
 
 def main() -> int:
+    trace("cli", "main", "ENTER")
     load_dotenv()
 
     parser = argparse.ArgumentParser(
@@ -307,6 +334,7 @@ def main() -> int:
             f.write(report.model_dump_json(indent=2))
         print(f"\nReport saved to {args.output}")
 
+    trace("cli", "main", "EXIT")
     return 0
 
 

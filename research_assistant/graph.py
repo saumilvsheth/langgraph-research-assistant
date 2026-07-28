@@ -15,6 +15,7 @@ from research_assistant.nodes import (
     tavily_search_node,
 )
 from research_assistant.state import ResearchState
+from research_assistant.trace import trace
 
 
 def build_research_graph(*, checkpointer=None):
@@ -26,6 +27,8 @@ def build_research_graph(*, checkpointer=None):
       -> council_evaluate -> route_after_chair
          -> regenerate_report (loop) OR council_human_verdict (interrupt) -> END
     """
+    trace("graph", "build_research_graph", "ENTER")
+
     builder = StateGraph(ResearchState)
 
     builder.add_node("prepare_analyst", prepare_analyst_node)
@@ -62,4 +65,7 @@ def build_research_graph(*, checkpointer=None):
     )
 
     memory = checkpointer or MemorySaver()
-    return builder.compile(checkpointer=memory)
+    graph = builder.compile(checkpointer=memory)
+
+    trace("graph", "build_research_graph", "EXIT", "graph compiled")
+    return graph
