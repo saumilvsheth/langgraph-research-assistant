@@ -2,6 +2,8 @@
 
 A LangGraph workflow that accepts an **analyst persona** (role, name, description), pauses for **optional human input**, searches the web with **Tavily**, generates a **structured research report**, and evaluates it with an **advanced model council** before final approval. Built-in **execution tracing** logs every function call so you can follow the exact flow in the terminal.
 
+For a detailed block-by-block reference with state transitions, routing tables, and diagrams, see **[FLOW.md](./FLOW.md)**.
+
 ## Architecture
 
 ```mermaid
@@ -372,6 +374,7 @@ research_assistant/
   usage.py         # Token usage and cost tracking
   trace.py         # Execution tracing helper (ENTER/EXIT/ROUTE/INTERRUPT)
 main.py            # CLI entry point with dual interrupt handling
+FLOW.md            # Block-by-block flow reference with state transitions
 requirements.txt
 .env.example
 ```
