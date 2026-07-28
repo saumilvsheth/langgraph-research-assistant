@@ -1,6 +1,6 @@
 # LangGraph Research Assistant
 
-A LangGraph workflow that accepts an **analyst persona** (role, name, description), pauses for **optional human input**, searches the web with **Tavily**, generates a **structured research report**, and evaluates it with an **advanced model council** before final approval.
+A LangGraph workflow that accepts an **analyst persona** (role, name, description), pauses for **optional human input**, searches the web with **Tavily**, generates a **structured research report**, and evaluates it with an **advanced model council** before final approval. Built-in **execution tracing** logs every function call so you can follow the exact flow in the terminal.
 
 ## Architecture
 
@@ -31,6 +31,82 @@ flowchart TD
 | `council_evaluate` | Four parallel reviewers + chair synthesize a council evaluation |
 | `regenerate_report` | Rewrites the report using council or human revision feedback |
 | `council_human_verdict` | Pauses for human approve / revise / reject after council review |
+
+## Execution Tracing
+
+Every function in the workflow emits trace lines to the terminal so you can follow execution from both a **functional** (which function ran) and **block** (which module/layer) standpoint.
+
+### Trace Format
+
+```
+>>> [block] function_name — PHASE | detail
+```
+
+| Part | Meaning |
+|------|---------|
+| `[block]` | Logical code block — `cli`, `graph`, `nodes`, `council`, `routing`, or `usage` |
+| `function_name` | The function being entered, exited, or routed |
+| `PHASE` | One of `ENTER`, `EXIT`, `INTERRUPT`, `ROUTE`, or `INVOKE` |
+| `detail` | Optional context (analyst name, scores, routing target, etc.) |
+
+### Example Output
+
+Running `python main.py ...` produces trace lines like:
+
+```
+>>> [cli] main — ENTER
+>>> [cli] run_research — ENTER | analyst=Dr. Sarah Chen, thread=None
+>>> [graph] build_research_graph — ENTER
+>>> [graph] build_research_graph — EXIT | graph compiled
+>>> [cli] run_research — INVOKE | graph.invoke #1
+>>> [nodes] prepare_analyst_node — ENTER | analyst=Dr. Sarah Chen
+>>> [nodes] _get_llm — ENTER
+>>> [nodes] _get_llm — EXIT | model=gpt-4o-mini
+>>> [usage] record_openai_usage — ENTER | step=prepare_analyst, model=gpt-4o-mini
+>>> [nodes] prepare_analyst_node — EXIT | search_query='biotech FDA approvals 2025'
+>>> [nodes] human_input_node — ENTER | analyst=Dr. Sarah Chen
+>>> [nodes] human_input_node — INTERRUPT | waiting for human guidance
+>>> [cli] run_research — INTERRUPT | type=human_guidance
+>>> [nodes] tavily_search_node — ENTER | query='biotech FDA approvals 2025'
+>>> [nodes] generate_report_node — ENTER
+>>> [nodes] council_evaluate_node — ENTER | report='Biotech Pipeline Review'
+>>> [council] run_council_parallel — ENTER | members=['Fact Checker', 'Methodology Critic', ...]
+>>> [council] synthesize_council — EXIT | score=8.2, verdict=approved
+>>> [routing] route_after_chair — ROUTE | next=council_human_verdict
+>>> [nodes] council_human_verdict_node — INTERRUPT | waiting for human verdict
+>>> [cli] run_research — EXIT | title='Biotech Pipeline Review'
+>>> [cli] main — EXIT
+```
+
+### Trace Blocks
+
+| Block | What it covers |
+|-------|----------------|
+| `cli` | CLI entry point, interrupt handlers, report printing (`main.py`) |
+| `graph` | LangGraph assembly and compilation (`graph.py`) |
+| `nodes` | All LangGraph node functions and helpers (`nodes.py`) |
+| `council` | Parallel reviewers, chair synthesis, config getters (`council.py`) |
+| `routing` | Conditional edge decisions after council and human verdict (`nodes.py`) |
+| `usage` | Token counting, cost calculation, usage aggregation (`usage.py`) |
+
+### Phase Types
+
+| Phase | When it appears |
+|-------|-----------------|
+| `ENTER` | Function starts executing |
+| `EXIT` | Function finishes (often with a result summary) |
+| `INTERRUPT` | Graph pauses for human input |
+| `ROUTE` | Conditional edge chooses the next node |
+| `INVOKE` | CLI calls `graph.invoke()` (numbered per resume cycle) |
+
+Tracing is always on and uses `flush=True` so lines appear immediately — even during long LLM calls. The helper lives in `research_assistant/trace.py`:
+
+```python
+from research_assistant.trace import trace
+
+trace("nodes", "prepare_analyst_node", "ENTER", f"analyst={analyst.name}")
+# >>> [nodes] prepare_analyst_node — ENTER | analyst=Dr. Sarah Chen
+```
 
 ## Advanced Model Council
 
@@ -66,7 +142,13 @@ If the consensus score is **below the threshold** (default `7.0/10`) or the verd
 2. Re-runs the council evaluation on the revised draft
 3. Repeats up to **`COUNCIL_MAX_REVISIONS`** times (default: 2)
 
-This happens **before** the human verdict interrupt, so low-quality drafts are improved automatically.
+This happens **before** the human verdict interrupt, so low-quality drafts are improved automatically. Trace lines show each revision cycle:
+
+```
+>>> [routing] route_after_chair — ROUTE | next=regenerate_report (score=6.2, revisions=0)
+>>> [nodes] regenerate_report_node — ENTER | revision=1
+>>> [nodes] council_evaluate_node — ENTER | report='Biotech Pipeline Review'
+```
 
 ### Human Verdict Interrupt
 
@@ -126,10 +208,21 @@ python main.py \
   --output report.json
 ```
 
+To capture trace output alongside the report:
+
+```bash
+python main.py \
+  --name "Dr. Sarah Chen" \
+  --role "Healthcare Equity Analyst" \
+  --description "Specializes in biotech IPOs and FDA approvals." \
+  2>&1 | tee run_trace.log
+```
+
 ### Python API
 
 ```python
 from research_assistant import Analyst, build_research_graph
+from research_assistant.usage import UsageSummary
 from langgraph.types import Command
 
 graph = build_research_graph()
@@ -277,6 +370,7 @@ research_assistant/
   graph.py         # Graph builder with council routing
   council.py       # Parallel reviewers + chair synthesis
   usage.py         # Token usage and cost tracking
+  trace.py         # Execution tracing helper (ENTER/EXIT/ROUTE/INTERRUPT)
 main.py            # CLI entry point with dual interrupt handling
 requirements.txt
 .env.example
